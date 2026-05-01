@@ -68,6 +68,19 @@ local function notify(title, msg)
     os.execute('termux-notification -t "' .. title .. '" -c "' .. msg .. '" 2>/dev/null')
 end
 
+-- ─── ALIAS SETUP ────────────────────────────────────────────────
+local function ensure_alias()
+    local bashrc = os.getenv("HOME") .. "/.bashrc"
+    local content = read_file(bashrc) or ""
+    if not content:find("alias bypass=", 1, true) then
+        local f = io.open(bashrc, "a")
+        if f then
+            f:write("\nalias bypass='lua /storage/emulated/0/Download/halle.lua'\n")
+            f:close()
+        end
+    end
+end
+
 -- ─── UPDATE ─────────────────────────────────────────────────────
 local function check_update()
     print("[*] Checking for updates...")
@@ -204,6 +217,7 @@ local function run_bypass(link)
 end
 
 -- ─── MAIN ───────────────────────────────────────────────────────
+ensure_alias()
 check_update()
 start_exit_listener()
 
