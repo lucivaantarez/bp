@@ -25,7 +25,7 @@ local REFRESH_URL  = "https://api.izen.lol/v1/refresh?url="
 local TARGET_DOMAIN = "auth.platorelay.com"
 
 local SCRIPT_PATH  = "/storage/emulated/0/Download/halle.lua"
-local REMOTE_URL   = "https://raw.githubusercontent.com/lucivaantarez/bp/main/halle.lua"
+local REMOTE_URL   = "https://raw.githubusercontent.com/lucivaantarez/bp/refs/heads/main/halle.lua"
 local EXIT_FLAG    = "/data/data/com.termux/files/usr/tmp/halle_exit"
 
 local LICENSE_DIRS = {
