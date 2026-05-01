@@ -27,18 +27,7 @@ local EXIT_FLAG     = "/data/data/com.termux/files/usr/tmp/halle_exit"
 local TMP_RESPONSE  = "/data/data/com.termux/files/usr/tmp/halle_resp.json"
 local TMP_UPDATE    = "/data/data/com.termux/files/usr/tmp/halle_update.lua"
 
-local LICENSE_DIRS = {
-    "com.roblox.clienr",
-    "com.roblox.cliens",
-    "com.roblox.client",
-    "com.roblox.clienv",
-    "com.roblox.clienw",
-    "com.roblox.clienx",
-    "com.roblox.clieny",
-    "com.roblox.clienz",
-}
-
-local LICENSE_PATH = "/storage/emulated/0/Android/data/%s/files/gloop/external/internals/Cache/license"
+local LICENSE_FILE  = "/storage/emulated/0/Delta/Internals/Cache/license"
 
 -- ─── HELPERS ────────────────────────────────────────────────────
 local function url_encode(url)
@@ -160,18 +149,6 @@ local function get_clipboard()
     return result and result:gsub("%s+$", "") or nil
 end
 
--- ─── POPUP ──────────────────────────────────────────────────────
-local function confirm_popup(url)
-    local preview = url:sub(1, 40) .. "..."
-    local handle = io.popen(
-        'termux-dialog confirm -t "halle.lua asking ur command, sir Lana" -i "would u like to proceed the flow?\\n' .. preview .. '" 2>/dev/null'
-    )
-    if not handle then return false end
-    local raw = handle:read("*all")
-    handle:close()
-    return raw:find('"yes"') ~= nil
-end
-
 -- ─── API CALL ───────────────────────────────────────────────────
 local function call_api(endpoint, link)
     local full_url = endpoint .. url_encode(link)
@@ -193,22 +170,12 @@ end
 
 -- ─── WRITE LICENSE ───────────────────────────────────────────────
 local function write_license(key)
-    local ok_count = 0
-    for _, dir in ipairs(LICENSE_DIRS) do
-        local path = string.format(LICENSE_PATH, dir)
-        local parent = path:match("(.+)/[^/]+$")
-        os.execute('su -c "mkdir -p \'' .. parent .. '\'"')
-        local wrote = os.execute(
-            string.format('su -c "echo -n \'%s\' > \'%s\'"', key, path)
-        )
-        if wrote then
-            print("[+] Written to " .. dir)
-            ok_count = ok_count + 1
-        else
-            print("[-] Failed:    " .. dir)
-        end
+    local wrote = write_file(LICENSE_FILE, key)
+    if wrote then
+        print("[+] Key written to license file.")
+    else
+        print("[-] Failed to write license file.")
     end
-    print("[*] Done: " .. ok_count .. "/" .. #LICENSE_DIRS .. " folders updated.")
 end
 
 -- ─── BYPASS FLOW ────────────────────────────────────────────────
@@ -224,7 +191,7 @@ local function run_bypass(link)
     if key then
         print("[+] Success! Key: " .. key)
         write_license(key)
-        notify("Bypass Success", "Key written to all folders!")
+        notify("Bypass Success", "Key written to license!")
         print("[*] Listening for next link...")
     else
         print("[-] Both bypass and refresh failed.")
@@ -256,14 +223,9 @@ while true do
 
     if clip and clip ~= last_clipboard then
         last_clipboard = clip
-
         if clip:find(TARGET_DOMAIN, 1, true) then
-            print("[*] Platorelay link detected! Showing popup...")
-            if confirm_popup(clip) then
-                run_bypass(clip)
-            else
-                print("[*] Cancelled. Still listening...")
-            end
+            print("[*] Platorelay link detected! Running bypass...")
+            run_bypass(clip)
         end
     end
 
