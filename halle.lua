@@ -3,30 +3,29 @@
 --  Repo: https://github.com/lucivaantarez/bp
 --
 --  SETUP (run once in Termux):
---    pkg install termux-api lua54 lua54-luasocket lua54-dkjson curl
---    curl -L https://github.com/lucivaantarez/bp/raw/main/halle.lua \
---         -o /storage/emulated/0/Download/halle.lua
---
---  RUN:
+--    pkg install termux-api lua54 curl -y
+--    termux-setup-storage
+--    curl -L https://raw.githubusercontent.com/lucivaantarez/bp/refs/heads/main/halle.lua -o /storage/emulated/0/Download/halle.lua
 --    lua /storage/emulated/0/Download/halle.lua
 --
+--  FROM NOW ON:
+--    bypass
+--
 --  EXIT:
---    Type 0 and press Enter in the terminal
+--    Type 0 and press Enter
 -- ================================================================
 
-local http = require("socket.http")
-local ltn12 = require("ltn12")
-local json = require("dkjson")
-
 -- ─── CONSTANTS ──────────────────────────────────────────────────
-local API_KEY      = "b71c5cd5-874c-49da-874a-15f31fb829ca"
-local API_URL      = "https://api.izen.lol/v1/bypass?url="
-local REFRESH_URL  = "https://api.izen.lol/v1/refresh?url="
+local API_KEY       = "b71c5cd5-874c-49da-874a-15f31fb829ca"
+local API_URL       = "https://api.izen.lol/v1/bypass?url="
+local REFRESH_URL   = "https://api.izen.lol/v1/refresh?url="
 local TARGET_DOMAIN = "auth.platorelay.com"
 
-local SCRIPT_PATH  = "/storage/emulated/0/Download/halle.lua"
-local REMOTE_URL   = "https://raw.githubusercontent.com/lucivaantarez/bp/refs/heads/main/halle.lua"
-local EXIT_FLAG    = "/data/data/com.termux/files/usr/tmp/halle_exit"
+local SCRIPT_PATH   = "/storage/emulated/0/Download/halle.lua"
+local REMOTE_URL    = "https://raw.githubusercontent.com/lucivaantarez/bp/refs/heads/main/halle.lua"
+local EXIT_FLAG     = "/data/data/com.termux/files/usr/tmp/halle_exit"
+local TMP_RESPONSE  = "/data/data/com.termux/files/usr/tmp/halle_resp.json"
+local TMP_UPDATE    = "/data/data/com.termux/files/usr/tmp/halle_update.lua"
 
 local LICENSE_DIRS = {
     "com.roblox.clienr",
@@ -68,6 +67,31 @@ local function notify(title, msg)
     os.execute('termux-notification -t "' .. title .. '" -c "' .. msg .. '" 2>/dev/null')
 end
 
+-- ─── JSON PARSE (no deps) ───────────────────────────────────────
+local function json_field(str, field)
+    return str:match('"' .. field .. '":%s*"([^"]*)"')
+end
+
+-- ─── CURL GET ───────────────────────────────────────────────────
+local function curl_get(url, out_file, headers)
+    local header_str = ""
+    if headers then
+        for k, v in pairs(headers) do
+            header_str = header_str .. string.format(' -H "%s: %s"', k, v)
+        end
+    end
+    local cmd = string.format(
+        'curl -s -o "%s" -w "%%{http_code}"%s "%s"',
+        out_file, header_str, url
+    )
+    local handle = io.popen(cmd)
+    if not handle then return nil, 0 end
+    local code_str = handle:read("*all")
+    handle:close()
+    local body = read_file(out_file) or ""
+    return body, tonumber(code_str) or 0
+end
+
 -- ─── ALIAS SETUP ────────────────────────────────────────────────
 local function ensure_alias()
     local bashrc = os.getenv("HOME") .. "/.bashrc"
@@ -84,18 +108,14 @@ end
 -- ─── UPDATE ─────────────────────────────────────────────────────
 local function check_update()
     print("[*] Checking for updates...")
-    local body = {}
-    local _, code = http.request{
-        url  = REMOTE_URL,
-        sink = ltn12.sink.table(body)
-    }
+    local _, code = curl_get(REMOTE_URL, TMP_UPDATE, nil)
 
     if code ~= 200 then
         print("[-] Update check failed (HTTP " .. tostring(code) .. "), continuing...")
         return
     end
 
-    local remote = table.concat(body)
+    local remote = read_file(TMP_UPDATE) or ""
     local local_content = read_file(SCRIPT_PATH) or ""
 
     if remote == local_content then
@@ -149,25 +169,22 @@ local function confirm_popup(url)
     if not handle then return false end
     local raw = handle:read("*all")
     handle:close()
-    local data = json.decode(raw)
-    return data and data.text == "yes"
+    return raw:find('"yes"') ~= nil
 end
 
--- ─── API ────────────────────────────────────────────────────────
+-- ─── API CALL ───────────────────────────────────────────────────
 local function call_api(endpoint, link)
-    local body = {}
-    local _, code = http.request{
-        url     = endpoint .. url_encode(link),
-        headers = { ["x-api-key"] = API_KEY },
-        sink    = ltn12.sink.table(body)
-    }
+    local full_url = endpoint .. url_encode(link)
+    local body, code = curl_get(full_url, TMP_RESPONSE, { ["x-api-key"] = API_KEY })
 
-    if code == 200 then
-        local data = json.decode(table.concat(body))
-        if data and data.status == "success" and data.result then
-            return data.result
+    if code == 200 and body then
+        local status = json_field(body, "status")
+        local result = json_field(body, "result")
+        if status == "success" and result then
+            return result
         end
-        print("[-] API error: " .. (data and data.message or "Unknown error"))
+        local msg = json_field(body, "message")
+        print("[-] API error: " .. (msg or "Unknown error"))
     else
         print("[-] HTTP error: " .. tostring(code))
     end
@@ -207,7 +224,6 @@ local function run_bypass(link)
     if key then
         print("[+] Success! Key: " .. key)
         write_license(key)
-
         notify("Bypass Success", "Key written to all folders!")
         print("[*] Listening for next link...")
     else
