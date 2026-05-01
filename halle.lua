@@ -131,7 +131,7 @@ end
 local function confirm_popup(url)
     local preview = url:sub(1, 40) .. "..."
     local handle = io.popen(
-        'termux-dialog confirm -t "Bypass Detected" -i "Run bypass for:\\n' .. preview .. '?" 2>/dev/null'
+        'termux-dialog confirm -t "halle.lua asking ur command, sir Lana" -i "would u like to proceed the flow?\\n' .. preview .. '" 2>/dev/null'
     )
     if not handle then return false end
     local raw = handle:read("*all")
@@ -186,21 +186,16 @@ local function run_bypass(link)
     print("[*] Running bypass...")
     local key = call_api(API_URL, link)
 
+    if not key then
+        print("[*] Bypass failed, trying refresh...")
+        key = call_api(REFRESH_URL, link)
+    end
+
     if key then
         print("[+] Success! Key: " .. key)
         write_license(key)
+
         notify("Bypass Success", "Key written to all folders!")
-        print("[*] Listening for next link...")
-        return
-    end
-
-    print("[*] Bypass failed, trying refresh...")
-    key = call_api(REFRESH_URL, link)
-
-    if key then
-        print("[+] Refresh success! Key: " .. key)
-        write_license(key)
-        notify("Refresh Success", "Key written to all folders!")
         print("[*] Listening for next link...")
     else
         print("[-] Both bypass and refresh failed.")
