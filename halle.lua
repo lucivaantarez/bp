@@ -1,6 +1,7 @@
 -- ================================================================
---  halle.lua — Platorelay Bypass Listener
+--  halle.lua — Platorelay Bypass Listener (Opus rebuild)
 --  Repo: https://github.com/lucivaantarez/bp
+--  Author: Saturnity (lucivaantarez)
 --
 --  SETUP (run once in Termux):
 --    pkg install termux-api lua54 curl -y
@@ -8,34 +9,78 @@
 --    curl -L https://raw.githubusercontent.com/lucivaantarez/bp/refs/heads/main/halle.lua -o /storage/emulated/0/Download/halle.lua
 --    lua /storage/emulated/0/Download/halle.lua
 --
---  FROM NOW ON:
---    bypass
---
---  EXIT:
---    Type 0 and press Enter
+--  USE:        bypass
+--  EXIT:       Ctrl+C  (or type 0 + Enter)
+--  LOG:        ~/.halle/halle.log
 -- ================================================================
 
--- ─── CONSTANTS ──────────────────────────────────────────────────
-local API_KEY       = "b71c5cd5-874c-49da-874a-15f31fb829ca"
-local API_URL       = "https://api.izen.lol/v1/bypass?url="
-local REFRESH_URL   = "https://api.izen.lol/v1/refresh?url="
-local TARGET_DOMAIN = "auth.platorelay.com"
+-- ─── CONFIG ─────────────────────────────────────────────────────
+local CONFIG = {
+    api_key       = "b71c5cd5-874c-49da-874a-15f31fb829ca",
+    api_url       = "https://api.izen.lol/v1/bypass?url=",
+    refresh_url   = "https://api.izen.lol/v1/refresh?url=",
+    target_host   = "auth.platorelay.com",
 
-local SCRIPT_PATH   = "/storage/emulated/0/Download/halle.lua"
-local REMOTE_URL    = "https://raw.githubusercontent.com/lucivaantarez/bp/refs/heads/main/halle.lua"
-local EXIT_FLAG     = "/data/data/com.termux/files/usr/tmp/halle_exit"
-local TMP_RESPONSE  = "/data/data/com.termux/files/usr/tmp/halle_resp.json"
-local TMP_UPDATE    = "/data/data/com.termux/files/usr/tmp/halle_update.lua"
+    script_path   = "/storage/emulated/0/Download/halle.lua",
+    remote_url    = "https://raw.githubusercontent.com/lucivaantarez/bp/refs/heads/main/halle.lua",
+    license_path  = "/storage/emulated/0/Delta/Internals/Cache/license",
 
-local LICENSE_FILE  = "/storage/emulated/0/Delta/Internals/Cache/license"
+    poll_interval = 1,      -- seconds between clipboard checks
+    api_timeout   = 20,     -- curl timeout in seconds
+    max_retries   = 3,      -- API retry attempts before giving up
+    retry_base    = 2,      -- exponential backoff base (seconds)
+}
 
--- ─── HELPERS ────────────────────────────────────────────────────
-local function url_encode(url)
-    return url:gsub("([^%w%-%.%_%~])", function(c)
-        return string.format("%%%02X", string.byte(c))
-    end)
+local TMP_DIR     = "/data/data/com.termux/files/usr/tmp"
+local STATE_DIR   = (os.getenv("HOME") or TMP_DIR) .. "/.halle"
+local LOG_FILE    = STATE_DIR .. "/halle.log"
+local TMP_RESP    = TMP_DIR .. "/halle_resp.json"
+local TMP_UPDATE  = TMP_DIR .. "/halle_update.lua"
+local DEDUP_FILE  = STATE_DIR .. "/last_link"
+
+-- ─── ANSI COLORS ────────────────────────────────────────────────
+local C = {
+    reset = "\27[0m",  dim    = "\27[2m",  bold = "\27[1m",
+    red   = "\27[31m", green  = "\27[32m", yellow = "\27[33m",
+    blue  = "\27[34m", purple = "\27[35m", cyan   = "\27[36m",
+}
+
+-- ─── LOGGING ────────────────────────────────────────────────────
+os.execute("mkdir -p " .. STATE_DIR .. " 2>/dev/null")
+
+local function ts()
+    return os.date("%Y-%m-%d %H:%M:%S")
 end
 
+local function log_write(level, msg)
+    local f = io.open(LOG_FILE, "a")
+    if f then
+        f:write(string.format("[%s] [%s] %s\n", ts(), level, msg))
+        f:close()
+    end
+end
+
+local function info(msg)
+    print(C.cyan .. "[*] " .. C.reset .. msg)
+    log_write("INFO", msg)
+end
+local function ok(msg)
+    print(C.green .. "[+] " .. C.reset .. msg)
+    log_write("OK", msg)
+end
+local function warn(msg)
+    print(C.yellow .. "[!] " .. C.reset .. msg)
+    log_write("WARN", msg)
+end
+local function err(msg)
+    print(C.red .. "[-] " .. C.reset .. msg)
+    log_write("ERR", msg)
+end
+local function dim(msg)
+    print(C.dim .. "    " .. msg .. C.reset)
+end
+
+-- ─── FILE HELPERS ───────────────────────────────────────────────
 local function read_file(path)
     local f = io.open(path, "r")
     if not f then return nil end
@@ -45,99 +90,115 @@ local function read_file(path)
 end
 
 local function write_file(path, content)
-    local f = io.open(path, "w")
-    if not f then return false end
-    f:write(content)
+    local f, e = io.open(path, "w")
+    if not f then
+        log_write("ERR", "write_file open failed: " .. tostring(e))
+        return false
+    end
+    local ok_write = f:write(content)
     f:close()
-    return true
+    return ok_write ~= nil
 end
 
-local function notify(title, msg)
-    os.execute('termux-notification -t "' .. title .. '" -c "' .. msg .. '" 2>/dev/null')
+local function file_exists(path)
+    local f = io.open(path, "r")
+    if f then f:close(); return true end
+    return false
 end
 
--- ─── JSON PARSE (no deps) ───────────────────────────────────────
-local function json_field(str, field)
-    return str:match('"' .. field .. '":%s*"([^"]*)"')
+local function ensure_parent_dir(path)
+    local dir = path:match("(.*)/[^/]+$")
+    if dir then
+        os.execute('mkdir -p "' .. dir .. '" 2>/dev/null')
+    end
 end
 
--- ─── CURL GET ───────────────────────────────────────────────────
+-- ─── URL ENCODING ───────────────────────────────────────────────
+local function url_encode(s)
+    return (s:gsub("([^%w%-%.%_%~])", function(c)
+        return string.format("%%%02X", string.byte(c))
+    end))
+end
+
+-- ─── JSON PARSER (handles escapes + nested) ─────────────────────
+-- Pulls a string value for `field`, properly handling \" \\ \n etc.
+local function json_string(str, field)
+    -- find: "field" : "
+    local pattern = '"' .. field:gsub('([%.%+%-%*%?%[%]%^%$%(%)%%])', '%%%1') .. '"%s*:%s*"'
+    local start_idx = str:find(pattern)
+    if not start_idx then return nil end
+    local value_start = str:find('"', start_idx + #field + 2, true)
+    if not value_start then return nil end
+    value_start = value_start + 1
+
+    local buf = {}
+    local i = value_start
+    while i <= #str do
+        local c = str:sub(i, i)
+        if c == "\\" then
+            local nxt = str:sub(i + 1, i + 1)
+            if nxt == "n" then buf[#buf+1] = "\n"
+            elseif nxt == "t" then buf[#buf+1] = "\t"
+            elseif nxt == "r" then buf[#buf+1] = "\r"
+            elseif nxt == '"' then buf[#buf+1] = '"'
+            elseif nxt == "\\" then buf[#buf+1] = "\\"
+            elseif nxt == "/" then buf[#buf+1] = "/"
+            else buf[#buf+1] = nxt end
+            i = i + 2
+        elseif c == '"' then
+            return table.concat(buf)
+        else
+            buf[#buf+1] = c
+            i = i + 1
+        end
+    end
+    return nil
+end
+
+-- ─── URL VALIDATION ─────────────────────────────────────────────
+-- Strict: must be a real http(s) URL, must contain target host as a
+-- proper hostname component (not just substring inside random text).
+local function extract_target_url(text)
+    if not text or #text == 0 or #text > 4096 then return nil end
+
+    -- Find http(s) URL boundaries. URLs end at whitespace, quotes, or end-of-string.
+    for url in text:gmatch("https?://[^%s\"'<>`]+") do
+        -- Parse host portion: between :// and the next / ? # or end
+        local host = url:match("^https?://([^/%?#]+)")
+        if host then
+            -- Strip port if present
+            local hostname = host:match("^([^:]+)") or host
+            -- Case-insensitive exact match OR subdomain match
+            local lower = hostname:lower()
+            if lower == CONFIG.target_host
+               or lower:sub(-(#CONFIG.target_host + 1)) == "." .. CONFIG.target_host then
+                return url
+            end
+        end
+    end
+    return nil
+end
+
+-- ─── CURL WRAPPER ───────────────────────────────────────────────
 local function curl_get(url, out_file, headers)
     local header_str = ""
     if headers then
         for k, v in pairs(headers) do
-            header_str = header_str .. string.format(' -H "%s: %s"', k, v)
+            header_str = header_str ..
+                string.format(' -H %q', k .. ": " .. v)
         end
     end
+    -- -s silent, -L follow redirects, -m timeout, -w writes http code to stdout
     local cmd = string.format(
-        'curl -s -o "%s" -w "%%{http_code}"%s "%s"',
-        out_file, header_str, url
+        'curl -sL -m %d -o %q -w "%%{http_code}"%s %q 2>/dev/null',
+        CONFIG.api_timeout, out_file, header_str, url
     )
     local handle = io.popen(cmd)
     if not handle then return nil, 0 end
-    local code_str = handle:read("*all")
+    local code_str = handle:read("*all") or ""
     handle:close()
     local body = read_file(out_file) or ""
-    return body, tonumber(code_str) or 0
-end
-
--- ─── ALIAS SETUP ────────────────────────────────────────────────
-local function ensure_alias()
-    local bashrc = os.getenv("HOME") .. "/.bashrc"
-    local content = read_file(bashrc) or ""
-    if not content:find("alias bypass=", 1, true) then
-        local f = io.open(bashrc, "a")
-        if f then
-            f:write("\nalias bypass='lua /storage/emulated/0/Download/halle.lua'\n")
-            f:close()
-        end
-    end
-end
-
--- ─── UPDATE ─────────────────────────────────────────────────────
-local function check_update()
-    print("[*] Checking for updates...")
-    local _, code = curl_get(REMOTE_URL, TMP_UPDATE, nil)
-
-    if code ~= 200 then
-        print("[-] Update check failed (HTTP " .. tostring(code) .. "), continuing...")
-        return
-    end
-
-    local remote = read_file(TMP_UPDATE) or ""
-    local local_content = read_file(SCRIPT_PATH) or ""
-
-    if remote == local_content then
-        print("[*] Already up to date.")
-        return
-    end
-
-    print("[*] Update found! Replacing script...")
-    if write_file(SCRIPT_PATH, remote) then
-        print("[+] Updated! Restarting...")
-        os.execute("lua " .. SCRIPT_PATH .. " &")
-        os.exit(0)
-    else
-        print("[-] Failed to write update, continuing with current version.")
-    end
-end
-
--- ─── EXIT LISTENER ──────────────────────────────────────────────
-local function start_exit_listener()
-    os.execute("rm -f " .. EXIT_FLAG)
-    os.execute([[sh -c 'while true; do
-        read -r line
-        if [ "$line" = "0" ]; then
-            touch ]] .. EXIT_FLAG .. [[
-            break
-        fi
-    done' &]])
-end
-
-local function exit_requested()
-    local f = io.open(EXIT_FLAG, "r")
-    if f then f:close(); return true end
-    return false
+    return body, tonumber(code_str:match("(%d+)") or "0") or 0
 end
 
 -- ─── CLIPBOARD ──────────────────────────────────────────────────
@@ -146,88 +207,251 @@ local function get_clipboard()
     if not handle then return nil end
     local result = handle:read("*all")
     handle:close()
-    return result and result:gsub("%s+$", "") or nil
+    if not result then return nil end
+    -- Trim trailing whitespace/newlines
+    return result:gsub("%s+$", "")
 end
 
--- ─── API CALL ───────────────────────────────────────────────────
-local function call_api(endpoint, link)
-    local full_url = endpoint .. url_encode(link)
-    local body, code = curl_get(full_url, TMP_RESPONSE, { ["x-api-key"] = API_KEY })
+-- ─── NOTIFICATIONS ──────────────────────────────────────────────
+local function notify(title, msg, is_error)
+    local priority = is_error and "high" or "default"
+    local cmd = string.format(
+        'termux-notification --priority %s -t %q -c %q 2>/dev/null',
+        priority, title, msg
+    )
+    os.execute(cmd)
+end
 
-    if code == 200 and body then
-        local status = json_field(body, "status")
-        local result = json_field(body, "result")
-        if status == "success" and result then
-            return result
+-- ─── DEDUP (don't re-bypass identical link) ─────────────────────
+local function was_recent(link)
+    local last = read_file(DEDUP_FILE)
+    if not last then return false end
+    -- last line is the previous link
+    return last:gsub("%s+$", "") == link
+end
+
+local function mark_recent(link)
+    write_file(DEDUP_FILE, link)
+end
+
+-- ─── ALIAS SETUP ────────────────────────────────────────────────
+local function ensure_alias()
+    local home = os.getenv("HOME")
+    if not home then return end
+    local bashrc = home .. "/.bashrc"
+    local content = read_file(bashrc) or ""
+    if not content:find("alias bypass=", 1, true) then
+        local f = io.open(bashrc, "a")
+        if f then
+            f:write("\n# halle.lua bypass alias\n")
+            f:write("alias bypass='lua " .. CONFIG.script_path .. "'\n")
+            f:close()
+            dim("Alias 'bypass' added to .bashrc (restart shell to use)")
         end
-        local msg = json_field(body, "message")
-        print("[-] API error: " .. (msg or "Unknown error"))
+    end
+end
+
+-- ─── SELF-UPDATE ────────────────────────────────────────────────
+local function check_update()
+    info("Checking for updates...")
+    local _, code = curl_get(CONFIG.remote_url, TMP_UPDATE, nil)
+
+    if code ~= 200 then
+        warn("Update check failed (HTTP " .. tostring(code) .. ") — continuing")
+        return
+    end
+
+    local remote = read_file(TMP_UPDATE) or ""
+    local current = read_file(CONFIG.script_path) or ""
+
+    if #remote < 100 then
+        warn("Remote response looks invalid (too small) — skipping update")
+        return
+    end
+
+    if remote == current then
+        dim("Already up to date.")
+        return
+    end
+
+    info("Update found — replacing script...")
+    if write_file(CONFIG.script_path, remote) then
+        ok("Updated. Restarting...")
+        os.execute("lua " .. CONFIG.script_path .. " &")
+        os.exit(0)
     else
-        print("[-] HTTP error: " .. tostring(code))
+        err("Failed to write update — continuing with current version.")
+    end
+end
+
+-- ─── API CALL with retry/backoff ────────────────────────────────
+local function call_api(endpoint, link, label)
+    local full_url = endpoint .. url_encode(link)
+
+    for attempt = 1, CONFIG.max_retries do
+        if attempt > 1 then
+            local delay = CONFIG.retry_base ^ (attempt - 1)
+            dim(string.format("Retry %d/%d in %ds...", attempt, CONFIG.max_retries, delay))
+            os.execute("sleep " .. delay)
+        end
+
+        local body, code = curl_get(full_url, TMP_RESP,
+            { ["x-api-key"] = CONFIG.api_key })
+
+        if code == 200 and body and #body > 0 then
+            local status = json_string(body, "status")
+            local result = json_string(body, "result")
+            if status == "success" and result and #result > 0 then
+                return result
+            end
+            local msg = json_string(body, "message") or "unknown"
+            dim(label .. " API said: " .. msg)
+        elseif code == 429 then
+            dim(label .. " rate-limited (HTTP 429)")
+        elseif code >= 500 then
+            dim(label .. " server error (HTTP " .. code .. ")")
+        else
+            dim(label .. " HTTP " .. tostring(code))
+            return nil  -- non-retryable client error
+        end
     end
     return nil
 end
 
--- ─── WRITE LICENSE ───────────────────────────────────────────────
+-- ─── LICENSE WRITE with verification ────────────────────────────
 local function write_license(key)
-    local wrote = write_file(LICENSE_FILE, key)
-    if wrote then
-        print("[+] Key written to license file.")
-    else
-        print("[-] Failed to write license file.")
+    ensure_parent_dir(CONFIG.license_path)
+
+    if not write_file(CONFIG.license_path, key) then
+        err("Failed to write license file at " .. CONFIG.license_path)
+        return false
     end
+
+    -- VERIFY: read it back and compare
+    local readback = read_file(CONFIG.license_path)
+    if readback == nil then
+        err("License file written but cannot be read back!")
+        return false
+    end
+    -- Strip trailing newline for compare (some editors add one)
+    if readback:gsub("%s+$", "") ~= key:gsub("%s+$", "") then
+        err("License file content mismatch after write!")
+        log_write("ERR", "Expected len=" .. #key .. " got len=" .. #readback)
+        return false
+    end
+
+    ok("Key written and verified (" .. #key .. " chars)")
+    return true
 end
 
 -- ─── BYPASS FLOW ────────────────────────────────────────────────
 local function run_bypass(link)
-    print("[*] Running bypass...")
-    local key = call_api(API_URL, link)
+    info("Running bypass...")
+    dim("Link: " .. link:sub(1, 80) .. (#link > 80 and "..." or ""))
+
+    local key = call_api(CONFIG.api_url, link, "bypass")
 
     if not key then
-        print("[*] Bypass failed, trying refresh...")
-        key = call_api(REFRESH_URL, link)
+        warn("Bypass failed — trying refresh endpoint...")
+        key = call_api(CONFIG.refresh_url, link, "refresh")
     end
 
     if key then
-        print("[+] Success! Key: " .. key)
-        write_license(key)
-        notify("Bypass Success", "Key written to license!")
-        print("[*] Listening for next link...")
+        ok("Success! Key: " .. C.bold .. key .. C.reset)
+        if write_license(key) then
+            notify("Bypass Success", "Key written to Delta license", false)
+        else
+            notify("Bypass Partial", "Got key but write FAILED — check log", true)
+        end
+        info("Listening for next link...")
     else
-        print("[-] Both bypass and refresh failed.")
-        notify("Bypass Failed", "Both bypass and refresh failed.")
+        err("Both bypass and refresh failed after " .. CONFIG.max_retries .. " attempts each")
+        notify("Bypass Failed", "Both endpoints failed. Check log.", true)
     end
 end
 
+-- ─── SIGNAL HANDLING (graceful Ctrl+C) ──────────────────────────
+-- Lua doesn't have native signal handling. We trap via shell wrapper
+-- if available, but also support the legacy "0 + Enter" exit.
+local EXIT_FLAG = TMP_DIR .. "/halle_exit"
+
+local function start_stdin_exit_watcher()
+    os.execute("rm -f " .. EXIT_FLAG .. " 2>/dev/null")
+    -- Background process that watches stdin for "0"
+    os.execute(string.format([[
+        ( while IFS= read -r line; do
+            case "$line" in
+                0|q|quit|exit) touch %q; exit 0 ;;
+            esac
+          done ) </dev/tty >/dev/null 2>&1 &
+    ]], EXIT_FLAG))
+end
+
+local function exit_requested()
+    return file_exists(EXIT_FLAG)
+end
+
+local function cleanup_and_exit(code)
+    os.execute("rm -f " .. EXIT_FLAG .. " 2>/dev/null")
+    print()
+    info("Goodbye, Saturnity. ✦")
+    os.exit(code or 0)
+end
+
 -- ─── MAIN ───────────────────────────────────────────────────────
-ensure_alias()
-check_update()
-start_exit_listener()
+local function banner()
+    print(C.purple .. "╔══════════════════════════════════════════╗")
+    print("║       halle.lua — bypass listener        ║")
+    print("║         saturnity / lucivaantarez        ║")
+    print("╚══════════════════════════════════════════╝" .. C.reset)
+    dim("Press 0 + Enter (or Ctrl+C) to exit")
+    dim("Log: " .. LOG_FILE)
+    print()
+end
 
-print("==========================================")
-print("  halle.lua — Bypass Listener")
-print("  Press [0] + Enter to exit anytime")
-print("==========================================")
-print("[*] Listening for platorelay links...")
+local function main()
+    banner()
+    log_write("INFO", "===== halle.lua starting =====")
 
-local last_clipboard = ""
+    ensure_alias()
+    check_update()
+    start_stdin_exit_watcher()
 
-while true do
-    if exit_requested() then
-        print("[!] Exit requested. Goodbye!")
-        os.execute("rm -f " .. EXIT_FLAG)
-        os.exit(0)
-    end
+    info("Listening for " .. CONFIG.target_host .. " links on clipboard...")
 
-    local clip = get_clipboard()
+    local last_seen = ""
 
-    if clip and clip ~= last_clipboard then
-        last_clipboard = clip
-        if clip:find(TARGET_DOMAIN, 1, true) then
-            print("[*] Platorelay link detected! Running bypass...")
-            run_bypass(clip)
+    while true do
+        if exit_requested() then
+            cleanup_and_exit(0)
         end
-    end
 
-    os.execute("sleep 2")
+        local clip = get_clipboard()
+
+        if clip and clip ~= last_seen then
+            last_seen = clip
+            local url = extract_target_url(clip)
+            if url then
+                if was_recent(url) then
+                    dim("Skipping duplicate link (already bypassed this one).")
+                else
+                    mark_recent(url)
+                    print()
+                    info("Platorelay link detected!")
+                    run_bypass(url)
+                    print()
+                end
+            end
+        end
+
+        os.execute("sleep " .. CONFIG.poll_interval)
+    end
+end
+
+-- Wrap main in pcall so unexpected errors get logged, not silently crashed
+local ok_run, error_msg = pcall(main)
+if not ok_run then
+    err("Fatal error: " .. tostring(error_msg))
+    log_write("FATAL", tostring(error_msg))
+    cleanup_and_exit(1)
 end
