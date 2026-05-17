@@ -398,6 +398,102 @@ local function cleanup_and_exit(code)
     os.exit(code or 0)
 end
 
+-- ─── DEPENDENCY SETUP ───────────────────────────────────────────
+-- Each entry: { binary_to_check, termux_package_name, friendly_name }
+-- Checks if the binary exists. If not, installs the package via pkg.
+-- Skips silently if everything's already in place.
+local DEPS = {
+    { bin = "curl",                 pkg = "curl",        name = "curl" },
+    { bin = "termux-clipboard-get", pkg = "termux-api",  name = "Termux:API" },
+    { bin = "termux-notification",  pkg = "termux-api",  name = "Termux:API" },
+}
+
+local function which(binary)
+    local h = io.popen("command -v " .. binary .. " 2>/dev/null")
+    if not h then return nil end
+    local path = h:read("*all")
+    h:close()
+    if path and #path > 0 then
+        return path:gsub("%s+$", "")
+    end
+    return nil
+end
+
+local function pkg_install(package)
+    -- -y auto-confirms. Output goes to terminal so user sees progress.
+    local cmd = "pkg install -y " .. package
+    info("Installing " .. package .. "...")
+    local code = os.execute(cmd)
+    return code == 0 or code == true
+end
+
+local function check_setup()
+    local missing = {}
+    local seen_pkg = {}  -- dedup pkg names (termux-api covers 2 bins)
+
+    for _, dep in ipairs(DEPS) do
+        if not which(dep.bin) then
+            if not seen_pkg[dep.pkg] then
+                seen_pkg[dep.pkg] = true
+                table.insert(missing, dep)
+            end
+        end
+    end
+
+    if #missing == 0 then
+        dim("All dependencies present.")
+        return true
+    end
+
+    warn("Missing dependencies detected:")
+    for _, dep in ipairs(missing) do
+        dim("  • " .. dep.name .. " (pkg: " .. dep.pkg .. ")")
+    end
+
+    -- Update repo index once before installing anything
+    info("Refreshing package lists...")
+    os.execute("pkg update -y 2>&1 | tail -3")
+
+    local failed = {}
+    for _, dep in ipairs(missing) do
+        if not pkg_install(dep.pkg) then
+            table.insert(failed, dep.pkg)
+        end
+    end
+
+    if #failed > 0 then
+        err("Failed to install: " .. table.concat(failed, ", "))
+        dim("Try manually: pkg update && pkg install " .. table.concat(failed, " "))
+        return false
+    end
+
+    -- Verify everything is now actually available
+    for _, dep in ipairs(DEPS) do
+        if not which(dep.bin) then
+            err("Still missing after install: " .. dep.bin)
+            if dep.pkg == "termux-api" then
+                dim("The 'termux-api' package is installed, but you also")
+                dim("need the Termux:API Android app from F-Droid:")
+                dim("  https://f-droid.org/packages/com.termux.api/")
+            end
+            return false
+        end
+    end
+
+    -- Check storage access (needed to write license to /storage/emulated/0)
+    local storage_test = io.open("/storage/emulated/0/", "r")
+    if not storage_test then
+        warn("Storage access not granted.")
+        dim("Run: termux-setup-storage")
+        dim("Then approve the permission popup and re-run halle.")
+        return false
+    end
+    storage_test:close()
+
+    ok("Setup complete!")
+    return true
+end
+
 -- ─── MAIN ───────────────────────────────────────────────────────
 local function banner()
     print(C.purple .. "╔══════════════════════════════════════════╗")
@@ -412,6 +508,12 @@ end
 local function main()
     banner()
     log_write("INFO", "===== halle.lua starting =====")
+
+    info("Checking dependencies...")
+    if not check_setup() then
+        err("Setup incomplete. Fix the issues above and restart.")
+        os.exit(1)
+    end
 
     ensure_alias()
     check_update()
