@@ -15,7 +15,7 @@
 -- ================================================================
 
 -- ─── CONFIG ─────────────────────────────────────────────────────
-local VERSION = "2.2.0"
+local VERSION = "2.3.0"
 
 local CONFIG = {
     api_key       = "b71c5cd5-874c-49da-874a-15f31fb829ca",
@@ -272,13 +272,16 @@ local function check_update()
         return
     end
 
-    if remote == current then
+    -- Compare by version string, not byte-for-byte (avoids line-ending false negatives)
+    local remote_ver = remote:match('local VERSION = "([^"]+)"') or "unknown"
+    if remote_ver == VERSION then
         dim("Already up to date. (v" .. VERSION .. ")")
         return
     end
-
-    -- Try to extract version from remote for the log message
-    local remote_ver = remote:match('local VERSION = "([^"]+)"') or "unknown"
+    if remote_ver == "unknown" then
+        warn("Could not read version from remote — skipping update to be safe")
+        return
+    end
     info("Update found: v" .. VERSION .. " → v" .. remote_ver .. " — replacing script...")
     if write_file(CONFIG.script_path, remote) then
         ok("Updated. Restarting...")
@@ -398,13 +401,13 @@ local EXIT_FLAG = TMP_DIR .. "/halle_exit"
 
 local function start_stdin_exit_watcher()
     os.execute("rm -f " .. EXIT_FLAG .. " 2>/dev/null")
-    -- Background process that watches stdin for "0"
+    -- Use stdin directly (not /dev/tty) — works in Redfinger where TTY is unavailable
     os.execute(string.format([[
-        ( while IFS= read -r line; do
+        ( while IFS= read -r line 2>/dev/null; do
             case "$line" in
-                0|q|quit|exit) touch %q; exit 0 ;;
+                0|q|quit|exit) touch %q; break ;;
             esac
-          done ) </dev/tty >/dev/null 2>&1 &
+          done ) &
     ]], EXIT_FLAG))
 end
 
