@@ -180,6 +180,10 @@ local function extract_target_url(text)
 end
 
 -- ─── CURL WRAPPER ───────────────────────────────────────────────
+-- HTTP code written to separate file to avoid io.popen stdout
+-- corruption on large bodies (loadstring payloads are very long).
+local TMP_CODE = TMP_DIR .. "/halle_code.txt"
+
 local function curl_get(url, out_file, headers)
     local header_str = ""
     if headers then
@@ -188,16 +192,13 @@ local function curl_get(url, out_file, headers)
                 string.format(' -H %q', k .. ": " .. v)
         end
     end
-    -- -s silent, -L follow redirects, -m timeout, -w writes http code to stdout
     local cmd = string.format(
-        'curl -sL -m %d -o %q -w "%%{http_code}"%s %q 2>/dev/null',
-        CONFIG.api_timeout, out_file, header_str, url
+        'curl -sL -m %d -o %q -w "%%{http_code}" %s %q > %q 2>/dev/null',
+        CONFIG.api_timeout, out_file, header_str, url, TMP_CODE
     )
-    local handle = io.popen(cmd)
-    if not handle then return nil, 0 end
-    local code_str = handle:read("*all") or ""
-    handle:close()
+    os.execute(cmd)
     local body = read_file(out_file) or ""
+    local code_str = read_file(TMP_CODE) or "0"
     return body, tonumber(code_str:match("(%d+)") or "0") or 0
 end
 
