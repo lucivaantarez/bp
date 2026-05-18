@@ -15,7 +15,7 @@
 -- ================================================================
 
 -- ─── CONFIG ─────────────────────────────────────────────────────
-local VERSION = "2.1.0"
+local VERSION = "2.2.0"
 
 local CONFIG = {
     api_key       = "b71c5cd5-874c-49da-874a-15f31fb829ca",
@@ -556,9 +556,16 @@ local function main()
             last_seen = clip
             local url = extract_target_url(clip)
             if url then
-                if was_recent(url) then
-                    dim("Skipping duplicate link (already bypassed this one).")
+                -- Re-bypass even if duplicate when license is missing/empty/short
+                local cur_key = read_file(CONFIG.license_path) or ""
+                local key_ok = #(cur_key:gsub("%s+", "")) > 10
+
+                if was_recent(url) and key_ok then
+                    dim("Skipping duplicate link (key already valid in license).")
                 else
+                    if was_recent(url) and not key_ok then
+                        warn("License missing or invalid — re-bypassing duplicate link.")
+                    end
                     mark_recent(url)
                     print()
                     info("Platorelay link detected!")
