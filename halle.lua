@@ -15,6 +15,8 @@
 -- ================================================================
 
 -- ─── CONFIG ─────────────────────────────────────────────────────
+local VERSION = "2.1.0"
+
 local CONFIG = {
     api_key       = "b71c5cd5-874c-49da-874a-15f31fb829ca",
     api_url       = "https://api.izen.lol/v1/bypass?url=",
@@ -271,11 +273,13 @@ local function check_update()
     end
 
     if remote == current then
-        dim("Already up to date.")
+        dim("Already up to date. (v" .. VERSION .. ")")
         return
     end
 
-    info("Update found — replacing script...")
+    -- Try to extract version from remote for the log message
+    local remote_ver = remote:match('local VERSION = "([^"]+)"') or "unknown"
+    info("Update found: v" .. VERSION .. " → v" .. remote_ver .. " — replacing script...")
     if write_file(CONFIG.script_path, remote) then
         ok("Updated. Restarting...")
         os.execute("lua " .. CONFIG.script_path .. " &")
@@ -366,8 +370,24 @@ local function run_bypass(link)
         end
         info("Listening for next link...")
     else
-        err("Both bypass and refresh failed after " .. CONFIG.max_retries .. " attempts each")
-        notify("Bypass Failed", "Both endpoints failed. Check log.", true)
+        warn("All attempts failed — retrying in 10 seconds...")
+        os.execute("sleep 10")
+        key = call_api(CONFIG.api_url, link, "bypass-retry")
+        if not key then
+            key = call_api(CONFIG.refresh_url, link, "refresh-retry")
+        end
+        if key then
+            ok("Retry succeeded! Key: " .. C.bold .. key .. C.reset)
+            if write_license(key) then
+                notify("Bypass Success (retry)", "Key written to Delta license", false)
+            else
+                notify("Bypass Partial", "Got key but write FAILED — check log", true)
+            end
+            info("Listening for next link...")
+        else
+            err("Bypass failed after all retries — giving up on this link")
+            notify("Bypass Failed", "All retries exhausted. Check log.", true)
+        end
     end
 end
 
@@ -500,6 +520,7 @@ local function banner()
     print(C.purple .. "╔══════════════════════════════════════════╗")
     print("║       halle.lua — bypass listener        ║")
     print("║         saturnity / lucivaantarez        ║")
+    print(string.format("║              version %-20s║", VERSION))
     print("╚══════════════════════════════════════════╝" .. C.reset)
     dim("Press 0 + Enter (or Ctrl+C) to exit")
     dim("Log: " .. LOG_FILE)
