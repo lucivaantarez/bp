@@ -15,7 +15,7 @@
 -- ================================================================
 
 -- ─── CONFIG ─────────────────────────────────────────────────────
-local VERSION = "2.3.0"
+local VERSION = "2.5.0"
 
 local CONFIG = {
     api_key       = "b71c5cd5-874c-49da-874a-15f31fb829ca",
@@ -28,7 +28,7 @@ local CONFIG = {
     license_path  = "/storage/emulated/0/Delta/Internals/Cache/license",
 
     poll_interval = 1,      -- seconds between clipboard checks
-    api_timeout   = 20,     -- curl timeout in seconds
+    api_timeout   = 60,     -- curl timeout in seconds (izen solver can take 30-50s)
     max_retries   = 3,      -- API retry attempts before giving up
     retry_base    = 2,      -- exponential backoff base (seconds)
 }
@@ -39,6 +39,7 @@ local LOG_FILE    = STATE_DIR .. "/halle.log"
 local TMP_RESP    = TMP_DIR .. "/halle_resp.json"
 local TMP_UPDATE  = TMP_DIR .. "/halle_update.lua"
 local DEDUP_FILE  = STATE_DIR .. "/last_link"
+local STATS_FILE  = STATE_DIR .. "/stats.json"
 
 -- ─── ANSI COLORS ────────────────────────────────────────────────
 local C = {
@@ -352,45 +353,146 @@ local function write_license(key)
     return true
 end
 
+-- ─── WIB TIMESTAMP (UTC+7) ─────────────────────────────────────
+local DAYS = {"Sunday","Monday","Tuesday","Wednesday","Thursday","Friday","Saturday"}
+
+local function wib_timestamp()
+    local t = os.time() + (7 * 3600)
+    local d = os.date("!*t", t)
+    local day = DAYS[d.wday]
+    return string.format("%s, %02d/%02d %02d:%02d", day, d.day, d.month, d.hour, d.min)
+end
+
+-- ─── STATS ───────────────────────────────────────────────────────
+local stats = { count = 0, last = "never", duration = "—" }
+
+local function load_stats()
+    local f = read_file(STATS_FILE)
+    if not f then return end
+    local count = f:match('"count":(%d+)')
+    local last   = f:match('"last":"([^"]*)"')
+    local dur    = f:match('"duration":"([^"]*)"')
+    if count then stats.count    = tonumber(count) end
+    if last  then stats.last     = last end
+    if dur   then stats.duration = dur end
+end
+
+local function save_stats()
+    write_file(STATS_FILE, string.format(
+        '{"count":%d,"last":"%s","duration":"%s"}',
+        stats.count, stats.last, stats.duration
+    ))
+end
+
+-- ─── DASHBOARD ───────────────────────────────────────────────────
+local BOX_W = 52  -- inner content width
+
+local function box_line(content)
+    -- pad content to BOX_W chars then wrap in borders
+    local padded = string.format("%-" .. BOX_W .. "s", content)
+    return "║  " .. padded:sub(1, BOX_W - 2) .. "  ║"
+end
+
+local function draw_dashboard()
+    local top    = "╔" .. string.rep("═", BOX_W + 2) .. "╗"
+    local div    = "╠" .. string.rep("═", BOX_W + 2) .. "╣"
+    local bot    = "╚" .. string.rep("═", BOX_W + 2) .. "╝"
+    local title  = box_line(string.format("halle.lua — bypass listener v%s", VERSION))
+    local c_bypassed = box_line(string.format("Bypassed : %s", stats.count))
+    local c_last     = box_line(string.format("Last     : %s", stats.last))
+    local c_dur      = box_line(string.format("Duration : %s", stats.duration))
+
+    io.write("[2J[H")  -- clear screen, cursor home
+    print(C.purple .. top)
+    print(title)
+    print(div)
+    print(c_bypassed)
+    print(c_last)
+    print(c_dur)
+    print(bot .. C.reset)
+end
+
+-- ─── LIVE SOLVING TIMER ──────────────────────────────────────────
+local function solving_timer(start_time, attempt)
+    local elapsed = os.time() - start_time
+    io.write(string.format("\rSolving - %ds (attempt %d/3)  ", elapsed, attempt))
+
+    io.flush()
+end
+
 -- ─── BYPASS FLOW ────────────────────────────────────────────────
 local function run_bypass(link)
-    info("Running bypass...")
-    dim("Link: " .. link:sub(1, 80) .. (#link > 80 and "..." or ""))
+    -- Extract short token from URL for display
+    local token = link:match("a%?d=([^&%s]+)") or link:match("/([^/?&]+)$") or "unknown"
+    if #token > 24 then token = token:sub(1, 24) end
 
+    local start_time = os.time()
+
+    draw_dashboard()
+    print("")
+    print("Link detected  · " .. token)
+
+    -- Attempt 1: bypass
+    io.write("Solving        · 0s  (attempt 1/3)")
+    io.flush()
+    local t0 = os.time()
+
+    -- spawn timer in background via a co-routine style busy check
+    -- (Lua is single-threaded; we print elapsed after call returns)
     local key = call_api(CONFIG.api_url, link, "bypass")
+    local elapsed = os.time() - start_time
+    io.write("\r" .. string.rep(" ", 50)); io.flush()
 
     if not key then
-        warn("Bypass failed — trying refresh endpoint...")
+        print(string.format("Attempt failed · %ds — trying refresh", elapsed))
+        log_write("WARN", "bypass failed, trying refresh")
         key = call_api(CONFIG.refresh_url, link, "refresh")
+        elapsed = os.time() - start_time
+        io.write("\r" .. string.rep(" ", 50)); io.flush()
     end
 
-    if key then
-        ok("Success! Key: " .. C.bold .. key .. C.reset)
-        if write_license(key) then
-            notify("Bypass Success", "Key written to Delta license", false)
-        else
-            notify("Bypass Partial", "Got key but write FAILED — check log", true)
-        end
-        info("Listening for next link...")
-    else
-        warn("All attempts failed — retrying in 10 seconds...")
+    if not key then
+        print(string.format("Attempt failed · %ds — waiting 10s", elapsed))
+        log_write("WARN", "refresh failed, waiting 10s before retry")
         os.execute("sleep 10")
         key = call_api(CONFIG.api_url, link, "bypass-retry")
+        elapsed = os.time() - start_time
+        io.write("\r" .. string.rep(" ", 50)); io.flush()
         if not key then
             key = call_api(CONFIG.refresh_url, link, "refresh-retry")
+            elapsed = os.time() - start_time
+            io.write("\r" .. string.rep(" ", 50)); io.flush()
         end
-        if key then
-            ok("Retry succeeded! Key: " .. C.bold .. key .. C.reset)
-            if write_license(key) then
-                notify("Bypass Success (retry)", "Key written to Delta license", false)
-            else
-                notify("Bypass Partial", "Got key but write FAILED — check log", true)
-            end
-            info("Listening for next link...")
+    end
+
+    elapsed = os.time() - start_time
+    local dur_str = elapsed .. "s"
+
+    if key then
+        print("Done           · " .. dur_str)
+        print("")
+        print("Key            · " .. key)
+        if write_license(key) then
+            print("Saved to Delta · verified")
+            notify("Bypass Success", "Key written to Delta license", false)
         else
-            err("Bypass failed after all retries — giving up on this link")
-            notify("Bypass Failed", "All retries exhausted. Check log.", true)
+            print("Saved to Delta · WRITE FAILED — check log")
+            notify("Bypass Partial", "Got key but write FAILED", true)
         end
+        -- update stats
+        stats.count    = stats.count + 1
+        stats.last     = wib_timestamp()
+        stats.duration = dur_str
+        save_stats()
+        draw_dashboard()
+        print("")
+        log_write("OK", "bypass complete in " .. dur_str .. " key=" .. key)
+    else
+        print("Failed         · gave up after " .. dur_str)
+        notify("Bypass Failed", "All retries exhausted. Check log.", true)
+        log_write("ERR", "bypass failed after " .. dur_str)
+        draw_dashboard()
+        print("")
     end
 end
 
@@ -520,14 +622,10 @@ end
 
 -- ─── MAIN ───────────────────────────────────────────────────────
 local function banner()
-    print(C.purple .. "╔══════════════════════════════════════════╗")
-    print("║       halle.lua — bypass listener        ║")
-    print("║         saturnity / lucivaantarez        ║")
-    print(string.format("║              version %-20s║", VERSION))
-    print("╚══════════════════════════════════════════╝" .. C.reset)
-    dim("Press 0 + Enter (or Ctrl+C) to exit")
-    dim("Log: " .. LOG_FILE)
-    print()
+    load_stats()
+    draw_dashboard()
+    print("")
+    print("Press 0 + Enter to exit  ·  Log: " .. LOG_FILE)
 end
 
 local function main()
@@ -544,7 +642,7 @@ local function main()
     check_update()
     start_stdin_exit_watcher()
 
-    info("Listening for " .. CONFIG.target_host .. " links on clipboard...")
+    print("\nWaiting for Platorelay link on clipboard...")
 
     local last_seen = ""
 
@@ -564,16 +662,14 @@ local function main()
                 local key_ok = #(cur_key:gsub("%s+", "")) > 10
 
                 if was_recent(url) and key_ok then
-                    dim("Skipping duplicate link (key already valid in license).")
+                    print("Duplicate link · key already valid, skipping")
                 else
                     if was_recent(url) and not key_ok then
-                        warn("License missing or invalid — re-bypassing duplicate link.")
+                        print("License invalid · re-bypassing duplicate link")
                     end
                     mark_recent(url)
-                    print()
-                    info("Platorelay link detected!")
                     run_bypass(url)
-                    print()
+                    print("Waiting for next link...")
                 end
             end
         end
